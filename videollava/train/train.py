@@ -29,7 +29,7 @@ import transformers
 
 from videollava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, \
     DEFAULT_IM_END_TOKEN, DEFAULT_VIDEO_TOKEN, DEFAULT_VID_START_TOKEN, DEFAULT_VID_END_TOKEN, MAX_IMAGE_LENGTH, \
-    MAX_VIDEO_LENGTH
+    MAX_VIDEO_LENGTH, DEFAULT_SPATIO_TOKEN
 from torch.utils.data import Dataset
 from videollava.train.llava_trainer import LLaVATrainer
 
@@ -348,10 +348,13 @@ def preprocess_multimodal(
 
             # <video><video><image><image>\nxxxxxxxxxxxxx -> `num_frames*<image>``num_frames*<image>`<image><image>\nxxxxxxxxxxxxx
             # <video>\nxxxxxxxxxxxxx -> `num_frames*<image>`\nxxxxxxxxxxxxx
-            # print('before replace_token:', [sentence['value']])
+            # Insert <spatio> tokens after <image> tokens for video, if enabled
+            num_spatio_tokens = getattr(data_args, 'num_spatio_tokens', 4)
+            spatio_token_str = DEFAULT_SPATIO_TOKEN * num_spatio_tokens
+            print('before replace_token:', [sentence['value']])
             sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
-            sentence['value'] = sentence['value'].replace(DEFAULT_VIDEO_TOKEN, vid_replace_token)
-            # print('after replace_token:', [sentence['value']])
+            sentence['value'] = sentence['value'].replace(DEFAULT_VIDEO_TOKEN, vid_replace_token, spatio_token_str)
+            print('after replace_token:', [sentence['value']])
             # ======================================================================================================
 
     return sources
