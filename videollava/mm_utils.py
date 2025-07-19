@@ -4,7 +4,7 @@ import base64
 
 import torch
 from transformers import StoppingCriteria
-from videollava.constants import IMAGE_TOKEN_INDEX
+from videollava.constants import IMAGE_TOKEN_INDEX, SPATIO_TOKEN_INDEX
 
 
 def load_image_from_base64(image):
@@ -40,21 +40,25 @@ def process_images(images, image_processor, model_cfg):
     return new_images
 
 
-def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]
-
-    def insert_separator(X, sep):
-        return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
-
+def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, spatio_token_index=SPATIO_TOKEN_INDEX, return_tensors=None):
+    # Split prompt on <image> and <spatio> tokens, keeping track of their positions
+    import re
+    # Find all <image> and <spatio> tokens and their positions
+    token_pattern = re.compile(r'(<image>|<spatio>)')
+    chunks = token_pattern.split(prompt)
     input_ids = []
     offset = 0
-    if len(prompt_chunks) > 0 and len(prompt_chunks[0]) > 0 and prompt_chunks[0][0] == tokenizer.bos_token_id:
-        offset = 1
-        input_ids.append(prompt_chunks[0][0])
-
-    for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
-        input_ids.extend(x[offset:])
-
+    for chunk in chunks:
+        if chunk == '<image>':
+            input_ids.append(image_token_index)
+        elif chunk == '<spatio>':
+            input_ids.append(spatio_token_index)
+        elif chunk:
+            ids = tokenizer(chunk).input_ids
+            if len(input_ids) == 0 and len(ids) > 0 and ids[0] == tokenizer.bos_token_id:
+                input_ids.append(ids[0])
+                ids = ids[1:]
+            input_ids.extend(ids)
     if return_tensors is not None:
         if return_tensors == 'pt':
             return torch.tensor(input_ids, dtype=torch.long)
