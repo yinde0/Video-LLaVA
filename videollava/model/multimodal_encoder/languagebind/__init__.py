@@ -173,6 +173,47 @@ class LanguageBindImageTower(nn.Module):
         return (self.config.image_size // self.config.patch_size) ** 2
 
 
+# === Add spatio-temporal pooling util ===
+def get_spatio_temporal_features_torch(features):
+    """
+    Computes spatio-temporal features from given features.
+    Parameters:
+    features (torch.Tensor): Input features to process.
+    Returns:
+    torch.Tensor: Spatio-temporal features.
+    """
+    # features: (t, s, c) or (b, t, s, c)
+    if features.dim() == 4:
+        # batch mode
+        b, t, s, c = features.shape
+        temporal_tokens = torch.mean(features, dim=2)  # (b, t, c)
+        padding_size = 100 - t
+        if padding_size > 0:
+            padding = torch.zeros((b, padding_size, c), device=features.device, dtype=features.dtype)
+            temporal_tokens = torch.cat((temporal_tokens, padding), dim=1)
+        elif padding_size < 0:
+            temporal_tokens = temporal_tokens[:, :100, :]
+        spatial_tokens = torch.mean(features, dim=1)  # (b, s, c)
+        spatial_tokens = torch.mean(spatial_tokens, dim=1)  # (b, c)
+        concat_tokens = torch.cat([temporal_tokens, spatial_tokens.unsqueeze(1)], dim=1).half()  # (b, 101, c)
+        return concat_tokens
+    elif features.dim() == 3:
+        t, s, c = features.shape
+        temporal_tokens = torch.mean(features, dim=1)  # (t, c)
+        padding_size = 100 - t
+        if padding_size > 0:
+            padding = torch.zeros((padding_size, c), device=features.device, dtype=features.dtype)
+            temporal_tokens = torch.cat((temporal_tokens, padding), dim=0)
+        elif padding_size < 0:
+            temporal_tokens = temporal_tokens[:100, :]
+        spatial_tokens = torch.mean(features, dim=0)  # (s, c)
+        spatial_tokens = torch.mean(spatial_tokens, dim=0)  # (c,)
+        concat_tokens = torch.cat([temporal_tokens, spatial_tokens.unsqueeze(0)], dim=0).half()  # (101, c)
+        return concat_tokens
+    else:
+        raise ValueError("Input features must be 3D or 4D tensor.")
+
+
 class LanguageBindVideoTower(nn.Module):
     def __init__(self, video_tower, args, delay_load=False, cache_dir='./cache_dir'):
         super().__init__()
@@ -221,11 +262,14 @@ class LanguageBindVideoTower(nn.Module):
             for video in videos:
                 video_forward_out = self.video_tower(video.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
                 video_feature = self.feature_select(video_forward_out).to(video.dtype)
-                video_features.append(video_feature)
+                # Apply spatio-temporal pooling
+                pooled_feature = get_spatio_temporal_features_torch(video_feature)
+                video_features.append(pooled_feature)
         else:
             video_forward_outs = self.video_tower(videos.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
             video_features = self.feature_select(video_forward_outs).to(videos.dtype)
-
+            # Apply spatio-temporal pooling
+            video_features = get_spatio_temporal_features_torch(video_features)
         return video_features
 
     @property
