@@ -43,4 +43,5 @@ HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 deepspeed videollava/train/train_me
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to tensorboard \
+    --num_spatio_tokens 4 \
     --cache_dir "./cache_dir"
