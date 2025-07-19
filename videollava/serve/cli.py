@@ -4,12 +4,13 @@ import os
 import torch
 
 from videollava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, \
-    DEFAULT_VIDEO_TOKEN
+    DEFAULT_VIDEO_TOKEN, DEFAULT_SPATIO_TOKEN
 from videollava.conversation import conv_templates, SeparatorStyle
 from videollava.model.builder import load_pretrained_model
 from videollava.serve.utils import load_image, image_ext, video_ext
 from videollava.utils import disable_torch_init
 from videollava.mm_utils import process_images, tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from videollava.model.multimodal_encoder.languagebind import get_spatio_temporal_features_torch
 
 from PIL import Image
 
@@ -31,6 +32,19 @@ def main(args):
                                                                      args.load_8bit, args.load_4bit,
                                                                      device=args.device, cache_dir=args.cache_dir)
     image_processor, video_processor = processor['image'], processor['video']
+
+    # Add <spatio> token to tokenizer and model
+    new_tokens = [DEFAULT_SPATIO_TOKEN]
+    num_new_tokens = tokenizer.add_tokens(new_tokens, special_tokens=True)
+    model.resize_token_embeddings(len(tokenizer))
+    if num_new_tokens > 0:
+        input_embeddings = model.get_input_embeddings().weight.data
+        output_embeddings = model.get_output_embeddings().weight.data
+        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+        input_embeddings[-num_new_tokens:] = input_embeddings_avg
+        output_embeddings[-num_new_tokens:] = output_embeddings_avg
+
     if 'llama-2' in model_name.lower():
         conv_mode = "llava_llama_2"
     elif "v1" in model_name.lower():
@@ -66,7 +80,25 @@ def main(args):
         print(file.shape)
         tensor.append(file)
 
+    video_spatio_temporal_features = None
+    if len(tensor) > 0 and tensor[0].dim() == 4:  # likely a video: (C, T, H, W)
+        video_tensor = tensor[0].unsqueeze(0) if tensor[0].dim() == 4 else tensor[0]
+        print(f"[DEBUG] CLI Video tensor shape: {video_tensor.shape}, dtype: {video_tensor.dtype}")
+        video_tower = model.get_video_tower()
+        with torch.no_grad():
+            video_features = video_tower(video_tensor)
+            print(f"[DEBUG] CLI Raw video features shape: {video_features.shape}, dtype: {video_features.dtype}")
+            if isinstance(video_features, (list, tuple)):
+                for i, feat in enumerate(video_features):
+                    print(f"[DEBUG] CLI video_features[{i}] shape: {feat.shape}, dtype: {feat.dtype}")
+            video_spatio_temporal_features = get_spatio_temporal_features_torch(video_features)
+            print(f"[DEBUG] CLI Spatiotemporal features shape: {video_spatio_temporal_features.shape}, dtype: {video_spatio_temporal_features.dtype}")
 
+    num_spatio_tokens = getattr(args, 'num_spatio_tokens', 4)  # default 4
+    num_image_tokens = getattr(args, 'num_image_tokens', 8)    # default 8
+
+    # Example prompt construction
+    prompt_prefix = (DEFAULT_IMAGE_TOKEN * num_image_tokens) + (DEFAULT_SPATIO_TOKEN * num_spatio_tokens)
 
 
     while True:
@@ -83,9 +115,9 @@ def main(args):
         if file is not None:
             # first message
             if getattr(model.config, "mm_use_im_start_end", False):
-                inp = ''.join([DEFAULT_IM_START_TOKEN + i + DEFAULT_IM_END_TOKEN for i in special_token]) + '\n' + inp
+                inp = ''.join([DEFAULT_IM_START_TOKEN + i + DEFAULT_IM_END_TOKEN for i in special_token]) + (DEFAULT_SPATIO_TOKEN * num_spatio_tokens) + '\n' + inp
             else:
-                inp = ''.join(special_token) + '\n' + inp
+                inp = ''.join(special_token) + (DEFAULT_SPATIO_TOKEN * num_spatio_tokens) + '\n' + inp
             conv.append_message(conv.roles[0], inp)
             file = None
         else:
@@ -100,10 +132,17 @@ def main(args):
         stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
         streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
+        # Before model.generate, check sequence length
+        max_seq_len = getattr(model.config, 'max_position_embeddings', 2048)
+        if input_ids is not None and input_ids.shape[-1] > max_seq_len:
+            print(f"[WARNING] Truncating input_ids from {input_ids.shape[-1]} to {max_seq_len}")
+            input_ids = input_ids[..., :max_seq_len]
+
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids,
                 images=tensor,  # video as fake images
+                video_spatio_temporal_features=video_spatio_temporal_features,
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
                 max_new_tokens=args.max_new_tokens,
