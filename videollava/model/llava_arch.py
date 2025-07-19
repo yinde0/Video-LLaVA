@@ -21,7 +21,7 @@ import torch.nn as nn
 from .multimodal_encoder.builder import build_image_tower, build_video_tower
 from .multimodal_projector.builder import build_vision_projector
 
-from videollava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from videollava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, SPATIO_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 
 class LlavaMetaModel:
@@ -146,8 +146,17 @@ class LlavaMetaForCausalLM(ABC):
         return video_features
 
     def prepare_inputs_labels_for_multimodal(
-        self, input_ids, position_ids, attention_mask, past_key_values, labels, images
+        self, input_ids, position_ids, attention_mask, past_key_values, labels, images, video_spatio_temporal_features=None
     ):
+        if video_spatio_temporal_features is not None:
+            print(f"[DEBUG] [prepare_inputs_labels_for_multimodal] Received video_spatio_temporal_features with shape: {video_spatio_temporal_features.shape}")
+            # Robust shape checks
+            if not (video_spatio_temporal_features.dim() in [2, 3]):
+                print(f"[WARNING] video_spatio_temporal_features has unexpected number of dimensions: {video_spatio_temporal_features.dim()}")
+            if video_spatio_temporal_features.shape[-1] < 64 or video_spatio_temporal_features.shape[-1] > 4096:
+                print(f"[WARNING] video_spatio_temporal_features last dimension (channels) is suspicious: {video_spatio_temporal_features.shape[-1]}")
+        else:
+            print("[DEBUG] [prepare_inputs_labels_for_multimodal] No video_spatio_temporal_features provided.")
         # ====================================================================================================
         image_tower = self.get_image_tower()
         video_tower = self.get_video_tower()
@@ -252,43 +261,63 @@ class LlavaMetaForCausalLM(ABC):
         new_labels = []
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
-            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
-            # print(num_images, cur_input_ids)
-            if num_images == 0:
-                cur_image_features = image_features[cur_image_idx]
-                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
-                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
-                new_input_embeds.append(cur_input_embeds)
-                new_labels.append(labels[batch_idx])
-                cur_image_idx += 1
-                continue
-
-            image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
-            cur_input_ids_noim = []
+            # Find all <image> and <spatio> token positions
+            image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist()
+            spatio_token_indices = torch.where(cur_input_ids == SPATIO_TOKEN_INDEX)[0].tolist()
             cur_labels = labels[batch_idx]
-            cur_labels_noim = []
-            for i in range(len(image_token_indices) - 1):
-                cur_input_ids_noim.append(cur_input_ids[image_token_indices[i]+1:image_token_indices[i+1]])
-                cur_labels_noim.append(cur_labels[image_token_indices[i]+1:image_token_indices[i+1]])
-            split_sizes = [x.shape[0] for x in cur_labels_noim]
-            cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
-            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            inserts = []
+            # Prepare per-frame/image features for <image> tokens
+            for i, idx in enumerate(image_token_indices):
+                if cur_image_idx < len(image_features):
+                    feat = image_features[cur_image_idx]
+                    if feat.dim() == 1:
+                        feat = feat.unsqueeze(0)
+                    # Project to LLM hidden size if needed
+                    if hasattr(self.get_model(), 'mm_projector'):
+                        feat_proj = self.get_model().mm_projector(feat)
+                    else:
+                        feat_proj = feat
+                    inserts.append((idx, feat_proj, 'image'))
+                    cur_image_idx += 1
+            # Prepare spatiotemporal features for <spatio> tokens
+            if video_spatio_temporal_features is not None:
+                if video_spatio_temporal_features.dim() == 3:
+                    vfeat = video_spatio_temporal_features[batch_idx]
+                else:
+                    vfeat = video_spatio_temporal_features
+                if vfeat.dim() == 1:
+                    vfeat = vfeat.unsqueeze(0)
+                # Project to LLM hidden size if needed
+                if hasattr(self.get_model(), 'mm_projector'):
+                    vfeat_proj = self.get_model().mm_projector(vfeat)
+                else:
+                    vfeat_proj = vfeat
+                for i, idx in enumerate(spatio_token_indices):
+                    inserts.append((idx, vfeat_proj, 'spatio'))
+            # Sort inserts by index
+            inserts.sort(key=lambda x: x[0])
+            # Build the embedding sequence: only embed text tokens
             cur_new_input_embeds = []
             cur_new_labels = []
-
-            for i in range(num_images + 1):
-                cur_new_input_embeds.append(cur_input_embeds_no_im[i])
-                cur_new_labels.append(cur_labels_noim[i])
-                if i < num_images:
-                    # print(cur_image_idx)
-                    cur_image_features = image_features[cur_image_idx]
-                    cur_image_idx += 1
-                    cur_new_input_embeds.append(cur_image_features)
-                    cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
-
-            cur_new_input_embeds = torch.cat(cur_new_input_embeds)
-            cur_new_labels = torch.cat(cur_new_labels)
-
+            last_idx = 0
+            for idx, feat_proj, typ in inserts:
+                # Embed text tokens between last_idx and idx
+                text_token_ids = cur_input_ids[last_idx:idx]
+                if len(text_token_ids) > 0:
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(text_token_ids))
+                    cur_new_labels.append(cur_labels[last_idx:idx])
+                # Insert projected feature for special token
+                cur_new_input_embeds.append(feat_proj)
+                mask_labels = torch.full((feat_proj.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype)
+                cur_new_labels.append(mask_labels)
+                last_idx = idx + 1
+            # Embed any trailing text tokens
+            text_token_ids = cur_input_ids[last_idx:]
+            if len(text_token_ids) > 0:
+                cur_new_input_embeds.append(self.get_model().embed_tokens(text_token_ids))
+                cur_new_labels.append(cur_labels[last_idx:])
+            cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
+            cur_new_labels = torch.cat(cur_new_labels, dim=0)
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
 
@@ -343,7 +372,32 @@ class LlavaMetaForCausalLM(ABC):
         if _position_ids is None:
             position_ids = None
 
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
+        # Check for negative indices in input_ids before returning
+        if input_ids is not None:
+            if isinstance(input_ids, list):
+                for i, ids in enumerate(input_ids):
+                    min_id = ids.min().item() if hasattr(ids, 'min') else None
+                    max_id = ids.max().item() if hasattr(ids, 'max') else None
+                    print(f"[CHECK] Returning input_ids for batch {i}: min={min_id}, max={max_id}")
+                    if min_id is not None and min_id < 0:
+                        print(f"[WARNING] Negative index detected in input_ids for batch {i}!")
+            else:
+                min_id = input_ids.min().item() if hasattr(input_ids, 'min') else None
+                max_id = input_ids.max().item() if hasattr(input_ids, 'max') else None
+                print(f"[CHECK] Returning input_ids: min={min_id}, max={max_id}")
+                if min_id is not None and min_id < 0:
+                    print(f"[WARNING] Negative index detected in input_ids!")
+
+        # After constructing new_input_embeds, before padding/truncation
+        for i, cur_new_input_embeds in enumerate(new_input_embeds):
+            print(f"[DEBUG] Final LLM input embedding sequence for batch {i}: shape {cur_new_input_embeds.shape}, dtype: {cur_new_input_embeds.dtype}")
+
+        # Assert that input_ids is None when returning new_input_embeds
+        if new_input_embeds is not None:
+            print("[CHECK] Returning new_input_embeds, setting input_ids to None.")
+            input_ids = None
+
+        return input_ids, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:
