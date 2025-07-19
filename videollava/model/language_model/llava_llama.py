@@ -65,8 +65,14 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         images: Optional[torch.FloatTensor] = None,
+        video_spatio_temporal_features: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+
+        if video_spatio_temporal_features is not None:
+            print(f"[DEBUG] Received video_spatio_temporal_features with shape: {video_spatio_temporal_features.shape}")
+        else:
+            print("[DEBUG] No video_spatio_temporal_features provided.")
 
         if inputs_embeds is None:
             (
@@ -82,9 +88,11 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 attention_mask,
                 past_key_values,
                 labels,
-                images
+                images,
+                video_spatio_temporal_features
             )
-
+        print(f"[DEBUG] input_ids: {input_ids}")
+        print(f"[DEBUG] inputs_embeds: {inputs_embeds.shape if inputs_embeds is not None else None}")
         return super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -98,13 +106,22 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             return_dict=return_dict
         )
 
+    def generate(self, *args, video_spatio_temporal_features=None, **kwargs):
+        if video_spatio_temporal_features is not None:
+            kwargs['video_spatio_temporal_features'] = video_spatio_temporal_features
+        return super().generate(*args, **kwargs)
+
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)
+        video_spatio_temporal_features = kwargs.pop("video_spatio_temporal_features", None)
         _inputs = super().prepare_inputs_for_generation(
             input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs
         )
         if images is not None:
             _inputs['images'] = images
+        if video_spatio_temporal_features is not None:
+            print(f"[DEBUG] prepare_inputs_for_generation: passing video_spatio_temporal_features with shape {video_spatio_temporal_features.shape}")
+            _inputs['video_spatio_temporal_features'] = video_spatio_temporal_features
         return _inputs
 
 AutoConfig.register("llava", LlavaConfig)
