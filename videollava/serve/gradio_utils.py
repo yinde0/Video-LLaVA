@@ -1,11 +1,12 @@
 import torch
 from transformers import TextStreamer
 
-from videollava.constants import IMAGE_TOKEN_INDEX
+from videollava.constants import IMAGE_TOKEN_INDEX, DEFAULT_SPATIO_TOKEN
 from videollava.conversation import conv_templates, SeparatorStyle
 from videollava.mm_utils import get_model_name_from_path, KeywordsStoppingCriteria, tokenizer_image_token
 from videollava.model.builder import load_pretrained_model
 from videollava.utils import disable_torch_init
+from videollava.model.multimodal_encoder.languagebind import get_spatio_temporal_features_torch
 
 title_markdown = ("""
 <div style="display: flex; justify-content: center; align-items: center; text-align: center;">
@@ -62,6 +63,18 @@ class Chat:
         self.device = self.model.device
         print(self.model)
 
+        # Add <spatio> token to tokenizer and model
+        new_tokens = [DEFAULT_SPATIO_TOKEN]
+        num_new_tokens = self.tokenizer.add_tokens(new_tokens, special_tokens=True)
+        self.model.resize_token_embeddings(len(self.tokenizer))
+        if num_new_tokens > 0:
+            input_embeddings = self.model.get_input_embeddings().weight.data
+            output_embeddings = self.model.get_output_embeddings().weight.data
+            input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+            output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+            input_embeddings[-num_new_tokens:] = input_embeddings_avg
+            output_embeddings[-num_new_tokens:] = output_embeddings_avg
+
     def get_prompt(self, qs, state):
         state.append_message(state.roles[0], qs)
         state.append_message(state.roles[1], None)
@@ -76,7 +89,6 @@ class Chat:
         # print('\n\n\n')
         # print(prompt)
 
-
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(self.device)
 
         temperature = 0.2
@@ -88,10 +100,24 @@ class Chat:
         stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
         streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
         print(prompt, input_ids, len(images_tensor), images_tensor[0].shape)
+
+        # --- Spatiotemporal feature extraction for video ---
+        video_spatio_temporal_features = None
+        if len(images_tensor) > 0 and images_tensor[0].dim() == 4:  # likely a video: (C, T, H, W) or (B, C, T, H, W)
+            video_tensor = images_tensor[0].unsqueeze(0) if images_tensor[0].dim() == 4 else images_tensor[0]
+            print(f"[DEBUG] Video tensor shape: {video_tensor.shape}, dtype: {video_tensor.dtype}")
+            
+            # Use the proper encode_videos method that applies projector
+            with torch.no_grad():
+                video_features = model.encode_videos(video_tensor)
+                print(f"[DEBUG] Encoded video features shape: {video_features.shape}, dtype: {video_features.dtype}")
+                video_spatio_temporal_features = video_features
+
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids,
                 images=images_tensor,
+                video_spatio_temporal_features=video_spatio_temporal_features,
                 do_sample=True,
                 temperature=temperature,
                 max_new_tokens=max_new_tokens,
