@@ -141,7 +141,7 @@ class LlavaMetaForCausalLM(ABC):
 
     def encode_videos(self, videos):  # [mini_b, c, t, h, w]
         b, _, t, _, _ = videos.shape
-        video_features = self.get_model().get_video_tower()(videos)  # [mini_b, t, n, c]
+        video_features = self.get_model().get_video_tower()(videos)  # [mini_b, 101, c] - already has spatiotemporal pooling
         video_features = self.get_model().mm_projector(video_features)
         return video_features
 
