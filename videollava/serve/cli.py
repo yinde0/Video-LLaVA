@@ -84,15 +84,12 @@ def main(args):
     if len(tensor) > 0 and tensor[0].dim() == 4:  # likely a video: (C, T, H, W)
         video_tensor = tensor[0].unsqueeze(0) if tensor[0].dim() == 4 else tensor[0]
         print(f"[DEBUG] CLI Video tensor shape: {video_tensor.shape}, dtype: {video_tensor.dtype}")
-        video_tower = model.get_video_tower()
+        
+        # Use the proper encode_videos method that applies projector
         with torch.no_grad():
-            video_features = video_tower(video_tensor)
-            print(f"[DEBUG] CLI Raw video features shape: {video_features.shape}, dtype: {video_features.dtype}")
-            if isinstance(video_features, (list, tuple)):
-                for i, feat in enumerate(video_features):
-                    print(f"[DEBUG] CLI video_features[{i}] shape: {feat.shape}, dtype: {feat.dtype}")
-            video_spatio_temporal_features = get_spatio_temporal_features_torch(video_features)
-            print(f"[DEBUG] CLI Spatiotemporal features shape: {video_spatio_temporal_features.shape}, dtype: {video_spatio_temporal_features.dtype}")
+            video_features = model.encode_videos(video_tensor)
+            print(f"[DEBUG] CLI Encoded video features shape: {video_features.shape}, dtype: {video_features.dtype}")
+            video_spatio_temporal_features = video_features
 
     num_spatio_tokens = getattr(args, 'num_spatio_tokens', 4)  # default 4
     num_image_tokens = getattr(args, 'num_image_tokens', 8)    # default 8
