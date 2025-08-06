@@ -174,44 +174,66 @@ class LanguageBindImageTower(nn.Module):
 
 
 # === Add spatio-temporal pooling util ===
-def get_spatio_temporal_features_torch(features):
+class SpatioTemporalPooling(nn.Module):
     """
     Computes spatio-temporal features from given features.
-    Parameters:
-    features (torch.Tensor): Input features to process.
-    Returns:
-    torch.Tensor: Spatio-temporal features.
+    This is now a trainable module that inherits from nn.Module.
     """
-    # features: (t, s, c) or (b, t, s, c)
-    if features.dim() == 4:
-        # batch mode
-        b, t, s, c = features.shape
-        temporal_tokens = torch.mean(features, dim=2)  # (b, t, c)
-        padding_size = 100 - t
-        if padding_size > 0:
-            padding = torch.zeros((b, padding_size, c), device=features.device, dtype=features.dtype)
-            temporal_tokens = torch.cat((temporal_tokens, padding), dim=1)
-        elif padding_size < 0:
-            temporal_tokens = temporal_tokens[:, :100, :]
-        spatial_tokens = torch.mean(features, dim=1)  # (b, s, c)
-        spatial_tokens = torch.mean(spatial_tokens, dim=1)  # (b, c)
-        concat_tokens = torch.cat([temporal_tokens, spatial_tokens.unsqueeze(1)], dim=1).half()  # (b, 101, c)
-        return concat_tokens
-    elif features.dim() == 3:
-        t, s, c = features.shape
-        temporal_tokens = torch.mean(features, dim=1)  # (t, c)
-        padding_size = 100 - t
-        if padding_size > 0:
-            padding = torch.zeros((padding_size, c), device=features.device, dtype=features.dtype)
-            temporal_tokens = torch.cat((temporal_tokens, padding), dim=0)
-        elif padding_size < 0:
-            temporal_tokens = temporal_tokens[:100, :]
-        spatial_tokens = torch.mean(features, dim=0)  # (s, c)
-        spatial_tokens = torch.mean(spatial_tokens, dim=0)  # (c,)
-        concat_tokens = torch.cat([temporal_tokens, spatial_tokens.unsqueeze(0)], dim=0).half()  # (101, c)
-        return concat_tokens
-    else:
-        raise ValueError("Input features must be 3D or 4D tensor.")
+    def __init__(self, max_temporal_tokens=100):
+        super().__init__()
+        self.max_temporal_tokens = max_temporal_tokens
+    
+    def forward(self, features):
+        """
+        Parameters:
+        features (torch.Tensor): Input features to process.
+        Returns:
+        torch.Tensor: Spatio-temporal features.
+        """
+        # features: (t, s, c) or (b, t, s, c)
+        if features.dim() == 4:
+            # batch mode
+            b, t, s, c = features.shape
+            temporal_tokens = torch.mean(features, dim=2)  # (b, t, c)
+            padding_size = self.max_temporal_tokens - t
+            if padding_size > 0:
+                padding = torch.zeros((b, padding_size, c), device=features.device, dtype=features.dtype)
+                temporal_tokens = torch.cat((temporal_tokens, padding), dim=1)
+            elif padding_size < 0:
+                temporal_tokens = temporal_tokens[:, :self.max_temporal_tokens, :]
+            spatial_tokens = torch.mean(features, dim=1)  # (b, s, c)
+            spatial_tokens = torch.mean(spatial_tokens, dim=1)  # (b, c)
+            concat_tokens = torch.cat([temporal_tokens, spatial_tokens.unsqueeze(1)], dim=1).half()  # (b, 101, c)
+            return concat_tokens
+        elif features.dim() == 3:
+            t, s, c = features.shape
+            temporal_tokens = torch.mean(features, dim=1)  # (t, c)
+            padding_size = self.max_temporal_tokens - t
+            if padding_size > 0:
+                padding = torch.zeros((padding_size, c), device=features.device, dtype=features.dtype)
+                temporal_tokens = torch.cat((temporal_tokens, padding), dim=0)
+            elif padding_size < 0:
+                temporal_tokens = temporal_tokens[:self.max_temporal_tokens, :]
+            spatial_tokens = torch.mean(features, dim=0)  # (s, c)
+            spatial_tokens = torch.mean(spatial_tokens, dim=0)  # (c,)
+            concat_tokens = torch.cat([temporal_tokens, spatial_tokens.unsqueeze(0)], dim=0).half()  # (101, c)
+            return concat_tokens
+        else:
+            raise ValueError("Input features must be 3D or 4D tensor.")
+
+# Keep the original function for backward compatibility, but mark it as deprecated
+def get_spatio_temporal_features_torch(features):
+    """
+    DEPRECATED: Use SpatioTemporalPooling class instead.
+    This function is not trainable and should be replaced with the nn.Module version.
+    """
+    import warnings
+    warnings.warn("get_spatio_temporal_features_torch is deprecated. Use SpatioTemporalPooling class instead.", 
+                  DeprecationWarning, stacklevel=2)
+    
+    # Create a temporary instance for backward compatibility
+    temp_pooling = SpatioTemporalPooling()
+    return temp_pooling(features)
 
 
 class LanguageBindVideoTower(nn.Module):
@@ -225,10 +247,13 @@ class LanguageBindVideoTower(nn.Module):
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
 
         self.cache_dir = cache_dir
+        
+        # Initialize the trainable spatio-temporal pooling module
+        self.spatio_temporal_pooling = SpatioTemporalPooling()
 
         if not delay_load:
             self.load_model()
-        else:
+        else:   
             self.cfg_only = LanguageBindVideoConfig.from_pretrained(self.video_tower_name, cache_dir=self.cache_dir)
 
     ############################################################
@@ -262,14 +287,14 @@ class LanguageBindVideoTower(nn.Module):
             for video in videos:
                 video_forward_out = self.video_tower(video.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
                 video_feature = self.feature_select(video_forward_out).to(video.dtype)
-                # Apply spatio-temporal pooling
-                pooled_feature = get_spatio_temporal_features_torch(video_feature)
+                # Apply spatio-temporal pooling using the trainable module
+                pooled_feature = self.spatio_temporal_pooling(video_feature)
                 video_features.append(pooled_feature)
         else:
             video_forward_outs = self.video_tower(videos.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
             video_features = self.feature_select(video_forward_outs).to(videos.dtype)
-            # Apply spatio-temporal pooling
-            video_features = get_spatio_temporal_features_torch(video_features)
+            # Apply spatio-temporal pooling using the trainable module
+            video_features = self.spatio_temporal_pooling(video_features)
         return video_features
 
     @property
