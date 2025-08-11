@@ -31,6 +31,15 @@ def main(args):
                                                                      args.load_8bit, args.load_4bit,
                                                                      device=args.device, cache_dir=args.cache_dir)
     image_processor, video_processor = processor['image'], processor['video']
+    
+    # Force override video tower configuration to use 32 frames
+    if hasattr(model, 'get_video_tower') and model.get_video_tower() is not None:
+        video_tower = model.get_video_tower()
+        if hasattr(video_tower, 'config') and hasattr(video_tower.config, 'num_frames'):
+            print(f"Original video tower num_frames: {video_tower.config.num_frames}")
+            video_tower.config.num_frames = 32
+            print(f"Overridden video tower num_frames: {video_tower.config.num_frames}")
+    
     if 'llama-2' in model_name.lower():
         conv_mode = "llava_llama_2"
     elif "v1" in model_name.lower():
@@ -59,7 +68,15 @@ def main(args):
             file = image_processor.preprocess(file, return_tensors='pt')['pixel_values'][0].to(model.device, dtype=torch.float16)
             special_token += [DEFAULT_IMAGE_TOKEN]
         elif os.path.splitext(file)[-1].lower() in video_ext:
+            print(f"Processing video file: {file}")
+            print(f"Video processor type: {type(video_processor)}")
+            print(f"Video tower config num_frames: {model.get_video_tower().config.num_frames}")
+            
             file = video_processor(file, return_tensors='pt')['pixel_values'][0].to(model.device, dtype=torch.float16)
+            print(f"Video processed shape: {file.shape}")
+            print(f"Video dtype: {file.dtype}")
+            print(f"Video value range: [{file.min():.3f}, {file.max():.3f}]")
+            
             special_token += [DEFAULT_IMAGE_TOKEN] * model.get_video_tower().config.num_frames
         else:
             raise ValueError(f'Support video of {video_ext} and image of {image_ext}, but found {os.path.splitext(file)[-1].lower()}')

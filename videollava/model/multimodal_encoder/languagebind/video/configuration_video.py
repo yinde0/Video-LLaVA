@@ -195,7 +195,7 @@ class CLIPVisionConfig(PretrainedConfig):
         initializer_factor=1.0,
 
         add_time_attn=False, ################################
-        num_frames=1, ################################
+        num_frames=32, ################################  # Updated from 1 to 32 for better video understanding
         force_patch_dropout=0.0, ################################
         lora_r=2, ################################
         lora_alpha=16, ################################

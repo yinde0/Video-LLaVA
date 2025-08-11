@@ -1,0 +1,11 @@
+# Caches
+cache_dir/
+**/cache_dir/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Env / secrets
+.env
+*.env
+.env.*

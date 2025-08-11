@@ -141,7 +141,22 @@ class LlavaMetaForCausalLM(ABC):
 
     def encode_videos(self, videos):  # [mini_b, c, t, h, w]
         b, _, t, _, _ = videos.shape
-        video_features = self.get_model().get_video_tower()(videos)  # [mini_b, t, n, c]
+        video_features = self.get_model().get_video_tower()(videos)  # [mini_b, K, c] after two-stage pooling
+        
+        # video_features shape is now [mini_b, K, c] where K=32 (configurable)
+        # This is compatible with mm_projector which expects [mini_b, seq_len, hidden_size]
+        
+        # Add safety checks to prevent probability tensor errors
+        if torch.isnan(video_features).any() or torch.isinf(video_features).any():
+            print("Warning: Video features contain NaN or inf values, replacing with zeros")
+            video_features = torch.where(torch.isnan(video_features) | torch.isinf(video_features), 
+                                       torch.zeros_like(video_features), video_features)
+        
+        # Normalize features to prevent overflow
+        if video_features.abs().max() > 100:
+            print(f"Warning: Video features too large (max: {video_features.abs().max():.2f}), normalizing")
+            video_features = video_features / (video_features.abs().max() + 1e-8) * 10
+        
         video_features = self.get_model().mm_projector(video_features)
         return video_features
 
@@ -204,10 +219,12 @@ class LlavaMetaForCausalLM(ABC):
                 tmp_image_features[pos] = image_features_minibatch[i]
 
         if getattr(videos_minibatch, 'ndim', 0) == 5:  # batch consists of videos, [mini_b, c, t, h, w]
-            video_features_minibatch = self.encode_videos(videos_minibatch)  # fake list [mini_b, t, l, c]
+            video_features_minibatch = self.encode_videos(videos_minibatch)  # [mini_b, K, c] after two-stage pooling
             for i, pos in enumerate(video_idx):
-                t = video_features_minibatch[i].shape[0]
-                tmp_image_features[pos] = [video_features_minibatch[i][j] for j in range(t)]
+                # video_features_minibatch[i] shape: [K, c] where K=32 (configurable)
+                # We need to split this into individual frame features for the multimodal input
+                K = video_features_minibatch[i].shape[0]  # Number of pooled tokens
+                tmp_image_features[pos] = [video_features_minibatch[i][j] for j in range(K)]
 
         new_tmp = []
         for image in tmp_image_features:
@@ -283,6 +300,9 @@ class LlavaMetaForCausalLM(ABC):
                     # print(cur_image_idx)
                     cur_image_features = image_features[cur_image_idx]
                     cur_image_idx += 1
+                    # Ensure cur_image_features has the right shape for concatenation
+                    if cur_image_features.ndim == 1:
+                        cur_image_features = cur_image_features.unsqueeze(0)  # [c] -> [1, c]
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
 

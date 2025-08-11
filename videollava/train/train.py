@@ -76,7 +76,7 @@ class DataArguments:
     data_path: Optional[List[str]] = field(default=None, metadata={"help": "Path to the training data."})
     image_folder: Optional[str] = field(default=None)
     video_folder: Optional[str] = field(default=None)
-    num_frames: int = 8
+    num_frames: int = 32  # Increased from 8 to 32 for better video understanding
     # ===================================================================
 
 

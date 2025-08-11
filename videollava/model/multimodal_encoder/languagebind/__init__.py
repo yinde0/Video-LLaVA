@@ -27,6 +27,13 @@ from .thermal.modeling_thermal import LanguageBindThermal
 from .thermal.tokenization_thermal import LanguageBindThermalTokenizer
 from .thermal.processing_thermal import LanguageBindThermalProcessor
 
+import torch.nn as nn
+from typing import Optional
+from transformers import ProcessorMixin, BatchEncoding
+from transformers.image_processing_utils import BatchFeature
+from PIL import Image
+import json
+import os
 
 
 config_dict = {
@@ -37,11 +44,11 @@ config_dict = {
     'audio': LanguageBindAudioConfig
 }
 model_dict = {
-    'thermal': LanguageBindThermal,
+    'thermal': LanguageBindImage,
     'image': LanguageBindImage,
     'video': LanguageBindVideo,
-    'depth': LanguageBindDepth,
-    'audio': LanguageBindAudio
+    'depth': LanguageBindImage,
+    'audio': LanguageBindImage
 }
 transform_dict = {
     'video': LanguageBindVideoProcessor,
@@ -50,6 +57,78 @@ transform_dict = {
     'thermal': LanguageBindThermalProcessor,
     'image': LanguageBindImageProcessor,
 }
+
+class TemporalPooler(nn.Module):
+    """
+    Per spatial site, attend across time (T) -> 1 temporally-pooled token per site.
+    Inputs:
+      x:    [B, T, S, C]
+      tmask:[B, T]  (1=valid, 0=pad). Optional if you don't pad T.
+    Output:
+      y:    [B, S, C]
+    """
+    def __init__(self, hidden_dim: int, num_heads: int = 8):
+        super().__init__()
+        self.ln = nn.LayerNorm(hidden_dim)
+        self.attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+
+    def forward(self, x: torch.Tensor, tmask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        B, T, S, C = x.shape
+        x = self.ln(x)
+        # Process each spatial site independently: reshape to [B*S, T, C]
+        x_bs = x.permute(0, 2, 1, 3).reshape(B * S, T, C)               # [B*S, T, C]
+        q = x_bs.mean(1, keepdim=True)                                   # [B*S, 1, C] simple init query
+        # key_padding_mask: True = ignore (so invert tmask)
+        kpm = None
+        if tmask is not None:
+            kpm = (tmask == 0).unsqueeze(1).expand(B, S, T).reshape(B * S, T)  # [B*S, T]
+        y, _ = self.attn(q, x_bs, x_bs, key_padding_mask=kpm)            # [B*S, 1, C]
+        y = y.squeeze(1).reshape(B, S, C)                                 # [B, S, C]
+        return y
+
+
+class SpatialPooler(nn.Module):
+    """
+    Global spatial pooling with K learnable queries.
+    Inputs:
+      x: [B, S, C]  (already temporally pooled)
+    Output:
+      y: [B, K, C]
+    """
+    def __init__(self, hidden_dim: int, num_queries: int = 32, num_heads: int = 8):
+        super().__init__()
+        self.K = num_queries
+        self.query = nn.Parameter(torch.randn(num_queries, hidden_dim))
+        self.ln = nn.LayerNorm(hidden_dim)
+        self.attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, S, C = x.shape
+        x = self.ln(x)                              # [B, S, C]
+        q = self.query.unsqueeze(0).expand(B, -1, -1)  # [B, K, C]
+        y, _ = self.attn(q, x, x)                  # [B, K, C]
+        return y                              # [B, K, C]
+
+
+class TwoStagePooler(nn.Module):
+    """
+    Temporal (per site) -> Spatial (global) pooling.
+    Inputs:
+      x:     [B, T, S, C]
+      tmask: [B, T] (optional)
+    Output:
+      y:     [B, K, C]
+    """
+    def __init__(self, hidden_dim: int, num_queries: int = 32, num_heads: int = 8):
+        super().__init__()
+        self.temporal = TemporalPooler(hidden_dim, num_heads=num_heads)
+        self.spatial  = SpatialPooler(hidden_dim, num_queries=num_queries, num_heads=num_heads)
+
+    def forward(self, x: torch.Tensor, tmask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x_t = self.temporal(x, tmask=tmask)   # [B, S, C]
+        y   = self.spatial(x_t)               # [B, K, C]
+        return y                              # [B, K, C]
+
 
 class LanguageBind(nn.Module):
     def __init__(self, clip_type=('thermal', 'image', 'video', 'depth', 'audio'), use_temp=True, cache_dir='./cache_dir'):
@@ -66,8 +145,11 @@ class LanguageBind(nn.Module):
             self.modality_proj[c] = model.visual_projection
             self.modality_scale[c] = model.logit_scale
             self.modality_config[c] = model.config
-        self.modality_encoder['language'] = model.text_model
-        self.modality_proj['language'] = model.text_projection
+        
+        # Only add language model if it exists on the model
+        if hasattr(model, 'text_model') and hasattr(model, 'text_projection'):
+            self.modality_encoder['language'] = model.text_model
+            self.modality_proj['language'] = model.text_projection
 
         self.modality_encoder = nn.ModuleDict(self.modality_encoder)
         self.modality_proj = nn.ModuleDict(self.modality_proj)
@@ -184,6 +266,9 @@ class LanguageBindVideoTower(nn.Module):
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
 
         self.cache_dir = cache_dir
+        
+        # Initialize two-stage pooler for video features
+        self.two_stage_pooler = None  # Will be initialized after loading the model
 
         if not delay_load:
             self.load_model()
@@ -195,11 +280,17 @@ class LanguageBindVideoTower(nn.Module):
         model = LanguageBindVideo.from_pretrained(self.video_tower_name, cache_dir=self.cache_dir)
         self.video_processor = LanguageBindVideoProcessor(model.config)
 
-
         # model = LanguageBindImage.from_pretrained('LanguageBind/LanguageBind_Image', cache_dir=self.cache_dir)
         self.video_tower = model.vision_model
         self.video_tower.requires_grad_(False)
-
+        
+        # Initialize two-stage pooler with the model's hidden size
+        hidden_dim = self.video_tower.config.hidden_size
+        self.two_stage_pooler = TwoStagePooler(
+            hidden_dim=hidden_dim,
+            num_queries=32,  # Configurable number of output tokens
+            num_heads=8
+        )
 
         self.is_loaded = True
 
@@ -221,10 +312,22 @@ class LanguageBindVideoTower(nn.Module):
             for video in videos:
                 video_forward_out = self.video_tower(video.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
                 video_feature = self.feature_select(video_forward_out).to(video.dtype)
-                video_features.append(video_feature)
+                
+                # Apply two-stage pooling: Temporal -> Spatial
+                if self.two_stage_pooler is not None:
+                    # video_feature shape: [1, T, N, C] where T=32, N=256, C=1024
+                    pooled_feature = self.two_stage_pooler(video_feature)
+                    video_features.append(pooled_feature)
+                else:
+                    video_features.append(video_feature)
         else:
             video_forward_outs = self.video_tower(videos.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
             video_features = self.feature_select(video_forward_outs).to(videos.dtype)
+            
+            # Apply two-stage pooling: Temporal -> Spatial
+            if self.two_stage_pooler is not None:
+                # video_features shape: [B, T, N, C] where T=32, N=256, C=1024
+                video_features = self.two_stage_pooler(video_features)
 
         return video_features
 
