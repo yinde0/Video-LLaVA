@@ -1,14 +1,18 @@
 
+CURR="$HOME/code/Video-LLaVA"
+cd  "$CURR"
+export PYTHONPATH="$PWD:$PYTHONPATH"
 
-CKPT_NAME="Video-LLaVA-7B"
+CKPT_NAME="video-llava-7b-lora"
 model_path="checkpoints/${CKPT_NAME}"
 cache_dir="./cache_dir"
 GPT_Zero_Shot_QA="eval/GPT_Zero_Shot_QA"
-video_dir="${GPT_Zero_Shot_QA}/TGIF_Zero_Shot_QA/mp4"
-gt_file_question="${GPT_Zero_Shot_QA}/TGIF_Zero_Shot_QA/test_q.json"
-gt_file_answers="${GPT_Zero_Shot_QA}/TGIF_Zero_Shot_QA/test_a.json"
-output_dir="${GPT_Zero_Shot_QA}/TGIF_Zero_Shot_QA/${CKPT_NAME}"
-
+video_dir="${GPT_Zero_Shot_QA}/TGIF_Zero_Shot_QA/TGIF_Zero_Shot_QA/mp4"
+gt_file_question="${GPT_Zero_Shot_QA}/TGIF_Zero_Shot_QA/TGIF_Zero_Shot_QA/test_q.json"
+gt_file_answers="${GPT_Zero_Shot_QA}/TGIF_Zero_Shot_QA/TGIF_Zero_Shot_QA/test_a.json"
+output_dir="${GPT_Zero_Shot_QA}/TGIF_Zero_Shot_QA/TGIF_Zero_Shot_QA/${CKPT_NAME}"
+MODEL_BASE="lmsys/vicuna-7b-v1.5"
+mkdir -p "$output_dir"
 
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
@@ -19,6 +23,7 @@ CHUNKS=${#GPULIST[@]}
 for IDX in $(seq 0 $((CHUNKS-1))); do
   CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python3 videollava/eval/video/run_inference_video_qa.py \
       --model_path ${model_path} \
+      --model_base "$MODEL_BASE" \
       --cache_dir ${cache_dir} \
       --video_dir ${video_dir} \
       --gt_file_question ${gt_file_question} \

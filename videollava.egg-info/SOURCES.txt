@@ -1,6 +1,9 @@
 LICENSE
 README.md
 pyproject.toml
+eval/MME/convert_answer_to_mme.py
+eval/mm-vet/convert_answers.py
+eval/seed_bench/extract_video_frames.py
 videollava/__init__.py
 videollava/constants.py
 videollava/conversation.py

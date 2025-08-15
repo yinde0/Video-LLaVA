@@ -8,15 +8,19 @@ from decord import VideoReader, cpu
 from torchvision import transforms
 from transformers import ProcessorMixin, BatchEncoding
 from transformers.image_processing_utils import BatchFeature
-from pytorchvideo.data.encoded_video import EncodedVideo
+try:
+    from pytorchvideo.data.encoded_video import EncodedVideo
+except Exception:
+    EncodedVideo = None
 from torchvision.transforms import Compose, Lambda, ToTensor
-from torchvision.transforms._transforms_video import NormalizeVideo, RandomCropVideo, RandomHorizontalFlipVideo, CenterCropVideo
-from pytorchvideo.transforms import ApplyTransformToKey, ShortSideScale, UniformTemporalSubsample
 from videollava.constants import (
     SMART_SAMPLING_MAX_CANDIDATES,
     SMART_SAMPLING_MOTION_WEIGHT,
     SMART_SAMPLING_SHARP_WEIGHT,
     SMART_SAMPLING_MIN_GAP_RATIO
+)
+from .fallback_video_transforms import (
+    NormalizeVideo, ShortSideScale, CenterCropVideo, RandomHorizontalFlipVideo
 )
 
 decord.bridge.set_bridge('torch')
@@ -391,6 +395,9 @@ def make_list_of_images(x):
 def get_video_transform(config):
     config = config.vision_config
     if config.video_decode_backend == 'pytorchvideo':
+        from pytorchvideo.transforms import ApplyTransformToKey, ShortSideScale as PVShortSideScale, UniformTemporalSubsample
+        from torchvision.transforms._transforms_video import NormalizeVideo as TVNormalizeVideo, RandomHorizontalFlipVideo as TVFlipVideo, CenterCropVideo as TVCenterCropVideo
+
         transform = ApplyTransformToKey(
             key="video",
             transform=Compose(

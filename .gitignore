@@ -9,3 +9,40 @@ __pycache__/
 .env
 *.env
 .env.*
+
+# Large directories to ignore
+cache_dir/
+eval/
+checkpoints/
+output_dir/
+
+# Large files to ignore
+videollava-7b-pretrain.tar.gz
+*.tar.gz
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+
+
+
